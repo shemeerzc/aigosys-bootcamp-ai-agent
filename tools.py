@@ -29,42 +29,132 @@ COLLEGE_FAQ = {
 }
 
 
+# Words to ignore when splitting a search query into keywords
+_STOP_WORDS = {
+    "a", "an", "the", "about", "more", "describe", "tell", "me", "any",
+    "upcoming", "all", "events", "event", "what", "are", "there", "is",
+    "some", "please", "give", "details", "detail",
+}
+
+
+def _keyword_groups(query):
+    """
+    Split query into keyword groups.
+    Each group has alternate spellings (e.g. cybersecurity → cyber, security).
+    Multi-word queries use AND: every group must match at least one alternate.
+    """
+    # Remove extra spaces and lowercase the whole query
+    text = query.strip().lower()
+    # Empty query → no keywords (means "show all events")
+    if not text:
+        return []
+
+    # Split on spaces (commas become spaces first)
+    words = text.replace(",", " ").split()
+    # Keep real keywords; drop stop words like "about", "the"
+    keywords = [w for w in words if w not in _STOP_WORDS and len(w) > 1]
+
+    # Each keyword becomes one group with possible alternate spellings
+    groups = []
+    # Process each keyword one by one
+    for word in keywords:
+        # Start with the word itself
+        alts = [word]
+        # "cybersecurity" in DB is stored as "Cyber Security" — add splits
+        if "cybersecurity" in word:
+            alts.extend(["cyber", "security"])
+        # Same idea for "datascience" vs "Data Science"
+        if "datascience" in word:
+            alts.extend(["data", "science"])
+        # Remove duplicate alternates inside this group
+        seen = set()
+        groups.append([a for a in alts if not (a in seen or seen.add(a))])
+    # Return list of keyword groups
+    return groups
+
+
 def search_events(query):
-    """Tool: search events by keyword in title or location."""
+    """Tool: search events by keyword(s) in title or location."""
     # Open database connection
     conn = get_connections()
     # Create cursor to run SQL
     cursor = conn.cursor()
 
-    # Run SELECT with LIKE search ( ? = safe placeholders )
-    cursor.execute(
-        """
-        SELECT title, date, location
-        FROM events
-        WHERE title LIKE ? COLLATE NOCASE
-           OR location LIKE ? COLLATE NOCASE
-        ORDER BY date
-        """,
-        # %query% means: match text containing the keyword
-        (f"%{query}%", f"%{query}%"),
-    )
+    # Turn user text into keyword groups
+    groups = _keyword_groups(query)
 
-    # Fetch all matching rows as a list of tuples
+    # Empty / generic question → return all events
+    if not groups:
+        # SELECT every row, sorted by date
+        cursor.execute(
+            """
+            SELECT title, date, location
+            FROM events
+            ORDER BY date
+            """
+        )
+    # One keyword group → OR match any alternate spelling
+    elif len(groups) == 1:
+        # SQL WHERE pieces will be joined with OR
+        parts = []
+        # Values for ? placeholders
+        params = []
+        # Loop each alternate spelling in the single group
+        for kw in groups[0]:
+            # Match keyword in title OR location (case-insensitive)
+            parts.append(
+                "(title LIKE ? COLLATE NOCASE OR location LIKE ? COLLATE NOCASE)"
+            )
+            # Add %keyword% pattern twice (title + location)
+            params.extend([f"%{kw}%", f"%{kw}%"])
+        # Build final SQL string
+        sql = f"""
+            SELECT DISTINCT title, date, location
+            FROM events
+            WHERE {" OR ".join(parts)}
+            ORDER BY date
+        """
+        # Run the query with safe parameters
+        cursor.execute(sql, params)
+    else:
+        # Multiple keyword groups → AND (each group must match)
+        and_parts = []
+        params = []
+        # Loop each keyword group
+        for group in groups:
+            or_parts = []
+            # Within one group, any alternate spelling can match (OR)
+            for kw in group:
+                or_parts.append(
+                    "(title LIKE ? COLLATE NOCASE OR location LIKE ? COLLATE NOCASE)"
+                )
+                params.extend([f"%{kw}%", f"%{kw}%"])
+            # Wrap group in parentheses: (alt1 OR alt2)
+            and_parts.append(f"({' OR '.join(or_parts)})")
+        # Join groups with AND
+        sql = f"""
+            SELECT DISTINCT title, date, location
+            FROM events
+            WHERE {" AND ".join(and_parts)}
+            ORDER BY date
+        """
+        cursor.execute(sql, params)
+
+    # Read all matching rows
     rows = cursor.fetchall()
     # Close DB connection
     conn.close()
 
-    # If nothing matched, return a clear message
+    # No matches → tell the agent clearly
     if not rows:
         return "No events found."
 
-    # Build a readable string list for the agent
+    # Build readable output lines
     lines = []
-    # Loop each row: unpack title, date, location
+    # Format each row as "title | date | location"
     for title, date, location in rows:
-        # Format one event per line
         lines.append(f"{title} | {date} | {location}")
-    # Join all lines with newlines and return
+    # Return multi-line string to the agent
     return "\n".join(lines)
 
 

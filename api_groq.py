@@ -38,41 +38,48 @@ class ChatRequest(BaseModel):
     message: str
 
 
-# On server start, prepare SQLite
+# Run this function automatically when uvicorn starts
 @app.on_event("startup")
 def startup():
+    # Create tables / seed data before handling requests
     init_db()
 
 
 # Health check — includes provider info
 @app.get("/api/health")
 def health():
+    # JSON response so students know this is the Groq local API
     return {"status": "ok", "provider": "groq", "mode": "local"}
 
 
-# Streaming chat endpoint (same shape as api.py)
+# Main chat endpoint — streams Groq agent events with SSE
 @app.post("/api/agent/chat")
 def chat(body: ChatRequest):
     """SSE streaming chat — same event shape as api.py"""
 
-    # Generator that yields SSE lines
+    # Inner generator that produces SSE lines
     def event_stream():
         try:
-            # Stream every Groq agent event
+            # Ask Groq agent and stream every event
             for event in stream_agent(body.message):
-                # SSE line format
+                # SSE format requires: data: <json>\n\n
                 yield f"data: {json.dumps(event)}\n\n"
-        # On error, still close the stream cleanly
+        # If anything crashes, send error then done
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
-    # Return streaming HTTP response
+    # Return a streaming HTTP response
     return StreamingResponse(
+        # Generator of SSE chunks
         event_stream(),
+        # Content type for Server-Sent Events
         media_type="text/event-stream",
+        # Extra headers to keep the stream open
         headers={
+            # Do not cache streamed responses
             "Cache-Control": "no-cache",
+            # Keep TCP connection alive during stream
             "Connection": "keep-alive",
         },
     )

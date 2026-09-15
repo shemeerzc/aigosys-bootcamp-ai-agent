@@ -36,7 +36,10 @@ TOOLS = [
             # Exact name must match call_tool() below
             "name": "search_events",
             # Plain-English description helps the model decide when to use it
-            "description": "Search college events by keyword (AI, coding, placement, etc.)",
+            "description": (
+                "Search college events. Use empty query or 'all' for every event. "
+                "For one event pass main keywords only (e.g. cyber, workshop, AI)."
+            ),
             # JSON Schema for arguments
             "parameters": {
                 "type": "object",

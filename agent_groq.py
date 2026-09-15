@@ -43,12 +43,18 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 # TOOLS schema — same tool list as agent.py (tells Groq what it can call)
 TOOLS = [
-    # Tool: search campus events
+    # ---- tool 1: search_events ----
     {
+        # Groq tool type (always "function" for tool calling)
         "type": "function",
         "function": {
+            # Must match call_tool() name below
             "name": "search_events",
-            "description": "Search college events by keyword (AI, coding, placement, etc.)",
+            # Helps Groq know when to use this tool
+            "description": (
+                "Search college events. Use empty query or 'all' for every event. "
+                "For one event pass main keywords only (e.g. cyber, workshop, AI)."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -61,7 +67,7 @@ TOOLS = [
             },
         },
     },
-    # Tool: create a reminder
+    # ---- tool 2: create_reminder ----
     {
         "type": "function",
         "function": {
@@ -79,16 +85,17 @@ TOOLS = [
             },
         },
     },
-    # Tool: list reminders
+    # ---- tool 3: list_reminders ----
     {
         "type": "function",
         "function": {
             "name": "list_reminders",
             "description": "List all saved reminders",
+            # No arguments needed
             "parameters": {"type": "object", "properties": {}},
         },
     },
-    # Tool: add a new event
+    # ---- tool 4: add_event ----
     {
         "type": "function",
         "function": {
@@ -108,7 +115,7 @@ TOOLS = [
             },
         },
     },
-    # Tool: campus FAQ
+    # ---- tool 5: college_faq ----
     {
         "type": "function",
         "function": {
@@ -128,7 +135,7 @@ TOOLS = [
             },
         },
     },
-    # Tool: generate certificate via pdf-app API
+    # ---- tool 6: generate_certificate ----
     {
         "type": "function",
         "function": {
@@ -184,12 +191,14 @@ def stream_agent(user_message):
     # Build starting messages (system + user)
     messages = [
         {
+            # system = rules for Groq model
             "role": "system",
             "content": (
                 "You are a helpful campus assistant. "
                 "Use tools for events, reminders, FAQ, and certificates when needed."
             ),
         },
+        # user = student question
         {"role": "user", "content": user_message},
     ]
 
@@ -197,22 +206,22 @@ def stream_agent(user_message):
     while True:
         # Create a streaming chat completion on Groq
         stream = client.chat.completions.create(
-            # Which Groq model to use
+            # Which Groq model to use (from .env)
             model=GROQ_MODEL,
-            # Conversation history
+            # Full conversation history
             messages=messages,
-            # Available tools
+            # Tell Groq which tools exist
             tools=TOOLS,
-            # Stream tokens live
+            # stream=True → print answer live
             stream=True,
         )
 
-        # Accumulate assistant text
+        # Accumulate assistant text from all chunks
         full_text = ""
         # Accumulate tool-call fragments by index
         collected_tools = {}
 
-        # Read each streamed chunk
+        # Read each streamed chunk from Groq
         for chunk in stream:
             # Some chunks may have empty choices — skip them
             if not chunk.choices:
@@ -220,29 +229,34 @@ def stream_agent(user_message):
             # New content in this chunk
             delta = chunk.choices[0].delta
 
-            # Stream normal text
+            # If chunk has normal text, stream it out
             if delta.content:
                 full_text += delta.content
                 yield {"type": "delta", "text": delta.content}
 
-            # Collect tool-call pieces
+            # If chunk has tool-call pieces, collect them
             if delta.tool_calls:
                 for tc in delta.tool_calls:
+                    # index groups pieces of the same tool call
                     i = tc.index
+                    # First time seeing this index → create empty slot
                     if i not in collected_tools:
                         collected_tools[i] = {
                             "id": "",
                             "name": "",
                             "arguments": "",
                         }
+                    # Save tool call id when it arrives
                     if tc.id:
                         collected_tools[i]["id"] = tc.id
+                    # Save function name when it arrives
                     if tc.function and tc.function.name:
                         collected_tools[i]["name"] = tc.function.name
+                    # Arguments arrive in pieces — append them
                     if tc.function and tc.function.arguments:
                         collected_tools[i]["arguments"] += tc.function.arguments
 
-        # No tools → finished
+        # No tools requested → final answer is done
         if not collected_tools:
             yield {"type": "done"}
             return
@@ -252,7 +266,7 @@ def stream_agent(user_message):
             if not t["id"]:
                 t["id"] = f"call_{i}"
 
-        # Append assistant tool request to history
+        # Save assistant tool request into chat history
         messages.append(
             {
                 "role": "assistant",
@@ -271,16 +285,21 @@ def stream_agent(user_message):
             }
         )
 
-        # Execute each tool and append results
+        # Run each requested tool in Python
         for t in collected_tools.values():
+            # Tool function name
             name = t["name"]
-            # Empty args string → use {}
+            # Parse JSON args (empty string → {})
             args = json.loads(t["arguments"] or "{}")
+            # Tell CLI/API which tool is running
             yield {"type": "tool_call", "name": name, "args": args}
 
+            # Execute real Python tool
             result = call_tool(name, args)
+            # Send tool output to CLI/API
             yield {"type": "tool_result", "result": str(result)}
 
+            # Add tool result back for next Groq call
             messages.append(
                 {
                     "role": "tool",
@@ -292,15 +311,21 @@ def stream_agent(user_message):
 
 def run_agent(user_message):
     """Print Groq agent stream in the terminal."""
+    # Print prefix before streamed text
     print("Agent (Groq): ", end="", flush=True)
+    # Consume every event from stream_agent
     for event in stream_agent(user_message):
+        # Normal answer text piece
         if event["type"] == "delta":
             print(event["text"], end="", flush=True)
+        # Model decided to call a tool
         elif event["type"] == "tool_call":
             print(f"\nTool call: {event['name']}({event['args']})")
             print("Agent (Groq): ", end="", flush=True)
+        # Tool finished and returned data
         elif event["type"] == "tool_result":
             print(f"Tool result: {event['result']}")
+        # Finished
         elif event["type"] == "done":
             print()
 
@@ -312,16 +337,21 @@ if __name__ == "__main__":
         print("Missing GROQ_API_KEY in .env — get one from https://console.groq.com")
         raise SystemExit(1)
 
-    # Prepare database
+    # Prepare database tables + sample data
     init_db()
-    # Show which model is active
+    # Show which Groq model is active
     print(f"Using Groq model: {GROQ_MODEL}")
+    # Tell student this is local-only demo
     print("Local only. Type quit to exit.\n")
 
     # Terminal chat loop
     while True:
+        # Read user input
         user = input("You: ").strip()
+        # Allow quit / exit to stop
         if user.lower() in ("quit", "exit"):
             break
+        # Run Groq agent for this message
         run_agent(user)
+        # Blank line between turns
         print()

@@ -2,4 +2,3 @@ openai
 python-dotenv
 fastapi
 uvicorn
-python-pptx
